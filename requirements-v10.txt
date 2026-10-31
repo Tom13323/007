@@ -1,0 +1,10 @@
+# 007 v10 - what to install before playing
+#
+# Install with:      pip install -r requirements-v10.txt
+# Play with:         python 007-premode-pygame-v10.py
+# Train the bots:    python 007-train-bot.py          (needs nothing extra)
+#
+# pygame 2.x is the only outside package (the game uses pygame 2 features).
+# Tested with pygame 2.6.1 on Python 3.12. Everything else the game and the trainer
+# import (json, random, math, zlib, argparse, ...) ships with Python.
+pygame>=2.0
