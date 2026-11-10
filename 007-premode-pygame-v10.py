@@ -1666,7 +1666,7 @@ def layout(players, viewer_id):
     for i, p in enumerate(others):
         pos[p["id"]] = ((ARENA_X0 + ARENA_X1) / 2, 190) if k == 1 else \
             (ARENA_X0 + (ARENA_X1 - ARENA_X0) * (i + 0.5) / k, 190)
-    pos[viewer_id] = ((ARENA_X0 + ARENA_X1) / 2, 385)
+    pos[viewer_id] = ((ARENA_X0 + ARENA_X1) / 2, 430)      # a bit lower so its action icon does not cover the bots' bullet row
     return pos
 
 
@@ -1707,7 +1707,7 @@ def draw_table(ctx, players, pos, *, alive_vis=None, bubbles=None, rings=None, t
             text(ctx, "med", f"{b}", (x - 10, by - 6), bc)
             draw_pip_shield(s, int(x + 32), int(by + 9), 10, C_PURPLE if p["has_reflect"] else (75, 78, 100))
             if b >= MG_COST:
-                text(ctx, "tiny", "MG READY", (x, by + 28), C_RED, "midtop")
+                text(ctx, "tiny", "MG READY", (x + 50, by + 9), C_RED, "midleft")
         if rings and pid in rings and alive:
             rc = rings[pid]
             rad = AV_R + 10 + 4 * math.sin(tnow * 9)
@@ -1720,7 +1720,7 @@ def draw_table(ctx, players, pos, *, alive_vis=None, bubbles=None, rings=None, t
             act, sub, sc = bubbles[pid]
             if sc > 0:
                 size = int(34 * sc)
-                cx, cy = int(x), int(y - AV_R - 46)
+                cx, cy = int(x), int(y - AV_R - 36)
                 rect = pygame.Rect(0, 0, size * 2, size * 2)
                 rect.center = (cx, cy)
                 c = ACT_COLOR[act]
@@ -1800,6 +1800,13 @@ def draw_log(ctx):
     ctx.pbtn_shown = True
 
 
+def elim_text(names):
+    """'You are eliminated' / 'Bot 1 eliminated' / 'You and Bot 1 are eliminated'."""
+    if len(names) == 1:
+        return f"{names[0]} are eliminated" if names[0] == "You" else f"{names[0]} eliminated"
+    return ", ".join(names[:-1]) + f" and {names[-1]} " + ("are eliminated" if "You" in names else "eliminated")
+
+
 def describe_events(players, outcome):
     names = {p["id"]: p["name"] for p in players}
     lines = []
@@ -1822,7 +1829,7 @@ def describe_events(players, outcome):
         elif k == "mg_clash":
             lines.append((f"{names[a]} and {names[t]}: MG clash, both die", C_RED))
     for pid in outcome["deaths"]:
-        lines.append((f"{names[pid]} eliminated", C_RED))
+        lines.append((elim_text([names[pid]]), C_RED))
     if not outcome["deaths"]:
         lines.append(("Nobody died.", C_GREEN))
     return lines
@@ -1834,7 +1841,7 @@ def describe_events(players, outcome):
 def button_rects():
     w, h, gap = 178, 150, 14
     x0 = (W - (6 * w + 5 * gap)) // 2
-    return {a: pygame.Rect(x0 + i * (w + gap), 520, w, h) for i, a in enumerate(ACT_ORDER)}
+    return {a: pygame.Rect(x0 + i * (w + gap), 538, w, h) for i, a in enumerate(ACT_ORDER)}
 
 
 def button_state(a, me, players):
@@ -2051,14 +2058,14 @@ def human_turn(ctx, me, players, round_no, hotseat=False):
         draw_table(ctx, players, pos, rings=rings, tnow=now, number_badges=badges)
         draw_log(ctx)
         if hotseat:
-            text(ctx, "med", f"{me['name']}'s turn", (W // 2, 468), C_GOLD, "midtop")
+            text(ctx, "med", f"{me['name']}'s turn", (W // 2, 448), C_GOLD, "midtop")
         if pending:
             col = C_RED if pending == "mg" else C_BLUE
-            text(ctx, "body", f"Pick a target for {ACT_NAME[pending]}: click a blinking player (or press 1-{len(opps)}).  Esc / right-click cancels.",
-                 (W // 2 + 100, 482), col, "midtop")
+            text(ctx, "body", f"Pick a target for {ACT_NAME[pending]}: click a blinking player (or press 1-{len(opps)}).  Esc cancels.",
+                 (745, 515), col, "midright")
         else:
             text(ctx, "body", "Choose your action  -  your choice is final once you click.",
-                 (W // 2 + 100, 490), C_MUTED, "midtop")
+                 (745, 515), C_MUTED, "midright")
         draw_buttons(ctx, me, players, hover=hover, selected=pending)
         pygame.display.flip()
 
@@ -2218,7 +2225,7 @@ def play_reveal(ctx, players_before, outcome, viewer_id, wait_click):
         draw_log(ctx)
         if t >= banner_t:
             died = [names[p] for p in outcome["deaths"]]
-            msg = (", ".join(died) + (" eliminated" if len(died) == 1 else " eliminated")) if died else "Nobody died"
+            msg = elim_text(died) if died else "Nobody died"
             col = C_RED if died else C_GREEN
             a = int(255 * min(1.0, (t - banner_t) / 0.25))
             text(ctx, "big", msg, (W // 2, 580), col, "center", shadow=True, alpha=a)
