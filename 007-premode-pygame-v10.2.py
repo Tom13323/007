@@ -1,47 +1,76 @@
 #!/usr/bin/env python3
 """
-007  -  v10
-========
-Turn-based, simultaneous-action tactical game ("only one shall stand").
+007 - Only one shall stand   (version 10.2)
+===========================================
+A multi-round, simultaneous-decision game for 2, 3 or 5 players: you against 1, 2 or 4 bots.
+Every round everybody secretly picks one action at the same time; the last player alive wins.
 
-Modes      : 1 Human vs 1 Bot (1H1B), 1H2B, 1H4B  (+ hot-seat "testing mode")
-Bot brain  : see 007-v9-bot-design.md (base design) and 007-v10-notes.md (what v10 adds)
+Actions (key)
+    Reload (R)        +1 bullet; defenseless this round
+    Shoot (S)         -1 bullet; kills the target unless it defends, reflects or shoots back at you
+    Defense (D)       free; blocks Shoot and Bomb
+    Bomb (B)          -(living players - 1) bullets; a Shoot at every other player at once
+    Reflect (E)       once per game; survives Shoot / Bomb and kills those attackers
+    Machine Gun (M)   -10 bullets; kills through Defense and Reflect
+    Two players shooting each other cancel.  MG against MG: both die.  MG against Shoot: both die
+    (the game's hidden rule).
 
-New in v10
-    * every opponent has a live "defense streak" (consecutive Defense rounds); the bot
-      starts from the prior P(Defense again | streak 1,2,3,4+) = 50%, 33%, 15%, 5%
-    * bullet bonus in the solved table (a bullet is worth more against death), plus a
-      bonus that grows while the bot itself keeps defending
-    * permanent per-bot memory files (bot_data_v10/botN_memory.json): bot 1 learns from
-      2/3/5-player games, bot 2 from 3/5, bots 3 and 4 from 5-player games only
-    * every finished game is recorded (bot_data_v10/game_records.jsonl), counted on the
-      setup screen and can be replayed from the game-over screen
-    * 007-train-bot.py rebuilds / trains the bot files from the recorded games
+How the bots decide (class ThinkingBot)
+    Layer 0  Rules engine.  resolve_round() resolves one round for any number of players.  The bots
+             use the same function to look ahead, so they can never disagree with the real rules.
+    Layer 1  Two players: the game is solved offline.  Value iteration over all 676 positions
+             (bullets 0-12 each, Reflect yes / no each); each position's round is a zero-sum matrix
+             game, solved by linear programming (solve_matrix_game).  The resulting values are
+             embedded at the end of this file (_V2P_B64); duel_solution() turns them into the
+             equilibrium mix of actions for the current position.
+    Layer 2  Opponent model (class OppMemory): how often each opponent does what, by bullets, by last
+             move and by Defense streak (starting guess: a human defends again 50 / 33 / 15 / 5 % of
+             the time after 1 / 2 / 3 / 4+ Defenses in a row).  In a duel the bot exploits this model
+             but never gives up more than `tol` of the equilibrium value.
+    Layer 3  Three or more players: Monte-Carlo look-ahead.  Sample the other players' moves from
+             their models, try every own action with the real rules engine, score the positions with
+             eval_state() and pick with a softmax.
+    Difficulty (ThinkingBot.LEVELS): Easy = equilibrium + 35 % random mistakes, no exploiting;
+             Normal = 3 % mistakes, medium exploiting; Hard = no mistakes, strong exploiting.
 
-    Layer 0  pure rules engine                  (resolve_round, legal_actions)
-    Layer 1  solved 2-player game               (value iteration + matrix-game LP,
-                                                 table embedded in this file)
-    Layer 2  opponent modelling / exploitation  (safe blend with the equilibrium)
-    Layer 3  3+ players: Monte-Carlo look-ahead (uses the real engine + layer 1)
+Learning between games (folder bot_data_v10/, created next to this file)
+    game_records.jsonl   every finished game, one per line (also used by REPLAY)
+    botN_memory.json     one per bot seat: long-term model of the human + win / loss lessons
+                         (apply_record).  Seat 1 plays in 2-, 3- and 5-player games, seat 2 in 3 and 5,
+                         seats 3 and 4 only in 5-player games.
+    tuned_params.json    two model parameters, re-fitted by 007-train-bot.py after every game
+                         (in a background thread: retune_in_background)
+
+File map (search for these section titles)
+    LAYER 0 - RULES ENGINE
+    LAYER 1 - TWO-PLAYER GAME
+    LAYER 2 - OPPONENT MODEL
+    LEARNING FROM RESULTS
+    LAYER 1+2+3 - THE BOT
+    BASELINE BOTS                        only for --tournament / --selftest
+    PERMANENT BOT MEMORY + GAME RECORDS
+    HEADLESS TOOLS                       self-test, tournament, solver
+    UI                                   everything that needs pygame: table, buttons, human turn,
+                                         round animation, match loop, tutorial, setup screen, main()
 
 Command line
-    python 007-premode-pygamev9.py                 normal game
-    python 007-premode-pygamev9.py --selftest      rule + solver unit tests
-    python 007-premode-pygamev9.py --tournament 200  bot strength measurements
-    python 007-premode-pygamev9.py --solve         re-solve the 2-player table
-    python 007-premode-pygamev9.py --autoplay --headless --games 3 [--shots DIR]
-                                                   scripted "human", used for testing
+    python 007-premode-pygame-v10.2.py                   play
+    python 007-premode-pygame-v10.2.py --selftest        checks of the rules, the solver and the bots
+    python 007-premode-pygame-v10.2.py --tournament 200  bot strength against baseline bots
+    python 007-premode-pygame-v10.2.py --solve           re-solve the 2-player table
+    python 007-premode-pygame-v10.2.py --autoplay --headless --games 3 --data-dir DIR
+                                                         scripted test run (use a DIR that is not your real data)
+    Options: --mode 1|2|4, --difficulty easy|normal|hard, --timer 3|5|10, --skip-tutorial,
+             --hotseat (Testing mode: every player is human), --data-dir DIR, --seed N
 
-Rules decided for v9
-    * Mutual Machine Gun: both shooters die. If nobody else is left -> draw,
-      otherwise the match continues with the remaining players.
-    * A Reflect user still kills every Shoot/Bomb attacker even if the same
-      user is also killed by a Machine Gun in that round (all effects are
-      simultaneous).  Reflect is spent the moment it is chosen.
+Rule details
+    * bullets and the Reflect charge are spent the moment an action is chosen
+    * a Reflect user still kills every Shoot / Bomb attacker even if a Machine Gun kills it in the
+      same round (all effects are simultaneous)
+    * two Machine Guns at each other: both die; if nobody else is left, the game is a draw
 """
 import argparse
 import base64
-import copy
 import json
 import math
 import os
@@ -65,20 +94,23 @@ MG_COST = 10
 
 
 def make_player(pid, name, human=False):
+    """Create a new player with 0 bullets, an unused Reflect and alive status."""
     return {"id": pid, "name": name, "bullets": 0, "has_reflect": True,
             "alive": True, "human": human}
 
 
 def alive_players(players):
+    """Return the players who are still in the game."""
     return [p for p in players if p["alive"]]
 
 
 def bomb_cost(players):
+    """Return the bullet cost of a Bomb, which is one bullet per other living player."""
     return max(1, len(alive_players(players)) - 1)
 
 
 def legal_actions(p, players):
-    """Every action this player may pick right now (targets are chosen separately)."""
+    """Return every action this player may choose right now."""
     if not p["alive"]:
         return []
     acts = ["reload", "defense"]
@@ -95,18 +127,19 @@ def legal_actions(p, players):
 
 
 def resolve_round(players, actions):
-    """
-    Pure simultaneous resolution.  `actions` = {pid: {"action": str, "target": pid|None}}.
-    Returns {"players": new list, "deaths": [pid], "events": [...], "actions": sanitized}.
+    """Resolve one round in which all players act at the same time.
 
-    Rules
-      * bullets / Reflect charge are spent the moment an action is chosen
-      * MG (10 bullets) kills its target no matter what; two players MG-ing each other both die
-      * Shoot/Bomb: a pair of players attacking each other cancels (both survive that link);
-        Defense blocks; Reflect survives AND kills every Shoot/Bomb attacker;
-        otherwise the target (also a Reloader) dies
-      * Bomb = Shoot at every other living player
-      * survivors that chose Reload gain +1 bullet
+    `actions` maps each player id to {"action": str, "target": id or None}.  The result is
+    {"players": new list, "deaths": [ids], "events": [...], "actions": cleaned actions}.
+
+    Rules:
+      * Bullets and the Reflect charge are spent the moment an action is chosen.
+      * A Machine Gun kills its target whatever it does; two players firing MG at each other both die.
+      * Two players who Shoot / Bomb each other cancel, so both survive that exchange.
+      * Defense blocks Shoot and Bomb.  Reflect also survives them and kills every attacker.
+      * Any other target of a Shoot or Bomb dies, including a player who reloads.
+      * A Bomb is a Shoot at every other living player.
+      * Survivors who chose Reload gain 1 bullet.
     """
     new = [dict(p) for p in players]
     by_id = {p["id"]: p for p in new}
@@ -199,9 +232,10 @@ def resolve_round(players, actions):
 #  LAYER 1 - TWO-PLAYER GAME: MATRIX-GAME SOLVER + VALUE ITERATION
 # ============================================================================
 def solve_matrix_game(A):
-    """
-    Zero-sum matrix game, A[i][j] = payoff to the row player (maximiser).
-    Pure-python simplex (Bland's rule).  Returns (row_strategy, col_strategy, value).
+    """Solve a zero-sum matrix game by linear programming and return both optimal mixes and its value.
+
+    A[i][j] is the payoff to the row player, who maximises.  The function uses a pure-Python simplex
+    method with Bland's rule and returns (row mix, column mix, value of the game).
     """
     m, n = len(A), len(A[0])
     lo = min(min(r) for r in A)
@@ -253,21 +287,22 @@ CAP = 12            # bullets above this are treated as CAP inside the solved ta
 GAMMA = 0.985       # tiny discount: prefer winning sooner, makes cycles converge
 CANON = ["reload", "defense", "shoot", "reflect", "mg"]     # Bomb == Shoot with 2 players
 
-# v10: a bullet is worth something on its own.  In a round that nobody dies the payoff gets
-#     k * (my bullet change - their bullet change)        (zero-sum, so the game stays solvable)
-# Death is still -1, so one bullet = k of a life.
-#   BULLET_K  is baked into the solved table.  It is 0: measured with 400-game matches, ANY k > 0 in the
-#             table makes the bot burn its Reflect early and costs 5-10 points against random and
-#             'sensible' opponents (see 007-v10-notes.md), so the table stays the true-game equilibrium.
-#   STREAK_K  is added at run time per round the bot has just defended in a row (cap STREAK_K_CAP):
-#             the longer the bot hides without hurting anybody, the more it needs ammunition.
-BULLET_K = 0.0
+# Bullet bonus, used only during play: for every round the bot has just defended in a row (at most
+# STREAK_K_CAP rounds), a round in which nobody dies is worth an extra
+#     STREAK_K * (my bullet change - their bullet change)        (zero-sum, so the game stays solvable)
+# The longer the bot hides without hurting anybody, the more it needs ammunition.  The solved table
+# itself has no bullet bonus: tests with 400-game matches showed that any bonus there makes the bot
+# waste its Reflect early, so the table stays the true-game equilibrium.
 STREAK_K = 0.04
 STREAK_K_CAP = 3
 V2P_SCALE = 2.0          # packed-table scale
 
 
 def legal2(b, r):
+    """Return the actions of one side in a 2-player position.
+
+    Bomb is left out, because with two players it is the same as Shoot.
+    """
     acts = ["reload", "defense"]
     if b >= 1:
         acts.append("shoot")
@@ -279,10 +314,19 @@ def legal2(b, r):
 
 
 def s2idx(b1, b2, r1, r2):
+    """Convert a 2-player position into its index in the solved value table.
+
+    A position is (my bullets, your bullets, my Reflect, your Reflect).  Bullets above CAP count as CAP.
+    """
     return ((min(b1, CAP) * (CAP + 1) + min(b2, CAP)) * 2 + int(bool(r1))) * 2 + int(bool(r2))
 
 
 def trans2(b1, b2, r1, r2, a1, a2):
+    """Play one 2-player round with the real rules and report where it leads.
+
+    It returns ("T", result, 0) when the round ends the game, with +1, -1 or 0 for side 1.  Otherwise
+    it returns ("S", index of the next position, change in the bullet difference).
+    """
     ps = [make_player(0, "a"), make_player(1, "b")]
     ps[0]["bullets"], ps[1]["bullets"] = b1, b2
     ps[0]["has_reflect"], ps[1]["has_reflect"] = bool(r1), bool(r2)
@@ -299,7 +343,14 @@ def trans2(b1, b2, r1, r2, a1, a2):
 
 
 def compute_value_table(max_iter=200, tol=2e-4, verbose=False):
-    """Value iteration (Gauss-Seidel) over the whole 2-player stochastic game."""
+    """Solve the whole 2-player game by value iteration.
+
+    V[s] is the value of position s for player 1, from +1 (certain win) to -1 (certain loss).  All values
+    start at 0.  For every position the function builds the payoff table of my action against your
+    action: +1, -1 or 0 when the round ends the game, otherwise GAMMA times the value of the next
+    position.  V[s] becomes the value of that matrix game.  This repeats until no value changes by
+    more than `tol`.
+    """
     states = [(b1, b2, r1, r2) for b1 in range(CAP + 1) for b2 in range(CAP + 1)
               for r1 in (0, 1) for r2 in (0, 1)]
     plan = []
@@ -311,7 +362,7 @@ def compute_value_table(max_iter=200, tol=2e-4, verbose=False):
     for it in range(max_iter):
         delta = 0.0
         for idx, grid in plan:
-            A = [[(t[1] if t[0] == "T" else GAMMA * V[t[1]] + BULLET_K * t[2]) for t in row] for row in grid]
+            A = [[(t[1] if t[0] == "T" else GAMMA * V[t[1]]) for t in row] for row in grid]
             v = solve_matrix_game(A)[2]
             delta = max(delta, abs(v - V[idx]))
             V[idx] = v
@@ -323,11 +374,13 @@ def compute_value_table(max_iter=200, tol=2e-4, verbose=False):
 
 
 def pack_table(V):
+    """Compress the value table into the text that is embedded in this file."""
     arr = array("h", [int(round(max(-V2P_SCALE, min(V2P_SCALE, v)) / V2P_SCALE * 30000)) for v in V])
     return base64.b64encode(zlib.compress(arr.tobytes(), 9)).decode("ascii")
 
 
 def unpack_table(b64):
+    """Turn the embedded text back into the value table."""
     arr = array("h")
     arr.frombytes(zlib.decompress(base64.b64decode(b64)))
     return [v / 30000.0 * V2P_SCALE for v in arr]
@@ -338,6 +391,11 @@ _DUEL_CACHE = {}
 
 
 def get_v2p():
+    """Return the solved 2-player value table, loading it on first use.
+
+    The table is normally unpacked from _V2P_B64.  Only if that text is missing is the game solved
+    from scratch, which takes about a minute.
+    """
     global _V2P
     if _V2P is None:
         if _V2P_B64:
@@ -349,10 +407,11 @@ def get_v2p():
 
 
 def duel_solution(p1, p2, boost=0):
-    """
-    Equilibrium of the current 2-player position. p1 = row player.
-    boost = how many rounds in a row p1 has just defended; each one adds STREAK_K to the bullet
-    bonus (the longer you hide, the more you need ammunition).
+    """Compute the equilibrium mix of actions for the current 2-player position.
+
+    p1 is the row player.  `boost` is the number of rounds p1 has just defended in a row; each one adds
+    STREAK_K to the value of gaining bullets, because the longer a player hides, the more it needs
+    ammunition.  The result is (p1's actions, p2's actions, p1's mix, p2's mix, value, payoff table).
     """
     b1, b2 = p1["bullets"], p2["bullets"]
     r1, r2 = bool(p1["has_reflect"]), bool(p2["has_reflect"])
@@ -362,7 +421,7 @@ def duel_solution(p1, p2, boost=0):
     if hit:
         return hit
     V = get_v2p()
-    k_eff = BULLET_K + STREAK_K * boost
+    k_eff = STREAK_K * boost
     la, lo = legal2(b1, r1), legal2(b2, r2)
     A = []
     for a in la:
@@ -380,6 +439,7 @@ def duel_solution(p1, p2, boost=0):
 
 
 def duel_value(me, opp):
+    """Return how good a 2-player position is for `me` according to the solved table."""
     return get_v2p()[s2idx(me["bullets"], opp["bullets"], me["has_reflect"], opp["has_reflect"])]
 
 
@@ -387,6 +447,10 @@ def duel_value(me, opp):
 #  LAYER 2 - OPPONENT MODEL
 # ============================================================================
 def bucket(b):
+    """Group a bullet count into one of 6 bands so that habits can be counted with little data.
+
+    The bands are 0, 1-2, 3-5, 6-8, 9 and 10+.
+    """
     return 0 if b == 0 else 1 if b <= 2 else 2 if b <= 5 else 3 if b <= 8 else 4 if b == 9 else 5
 
 
@@ -396,20 +460,26 @@ _UNSET = object()
 
 
 def streak_bucket(d):
+    """Group a Defense streak length into 1, 2, 3 or '4 or more'."""
     return min(int(d), 4)
 
 
 class OppMemory:
-    """
-    Frequency model of one opponent:
-        P(action | bullet bucket, last action)   and   P(action | defense streak)
-    live part : decays every round, so it analyses the NEW game.
-    base part : frozen history of earlier games (attach_base), loaded when a game starts and
-                never changed during the game - the 'previous result as a fixed variable'.
-    `streak` = number of consecutive Defense rounds right now (reset to 0 by any other action).
+    """Model one opponent's habits from the moves it has made.
+
+    It counts how often the opponent chose each action, by bullet band, by (band, last move) and by
+    Defense streak.  The live part fades a little every round, so it follows the current game.  The
+    base part holds earlier games; it is attached when a game starts and does not change during it.
     """
 
     def __init__(self, decay=0.93):
+        """Create an empty model of one opponent.
+
+        `decay` is how much every older observation still counts after each new one: 0.93 inside a game,
+        1.0 for the saved long-term model, which fades once per game instead.  The tables are c0 (all
+        moves), c1 (by bullet band), c2 (by band and last move), cs (by Defense streak) and tgt (who this
+        opponent shoots at).
+        """
         self.DECAY = decay
         self.c0 = defaultdict(float)
         self.c1 = defaultdict(lambda: defaultdict(float))
@@ -422,15 +492,23 @@ class OppMemory:
         self.base_w = 0.0
 
     def reset_game(self):
+        """Start a new game by forgetting the last move and the current streak, keeping the counts."""
         self.last = None
         self.streak = 0
 
     def attach_base(self, base):
-        """All stored history counts in full (no cap): the more games, the better the model."""
+        """Attach the frozen counts from earlier games as the base of this model.
+
+        Every stored game counts in full, with no cap, so the model improves with every game played.
+        """
         self.base = base
         self.base_w = 1.0 if sum(base.c0.values()) > 0 else 0.0
 
     def update(self, bullets, action, target):
+        """Count one observed move and update the Defense streak.
+
+        All earlier counts fade by DECAY before the new move is added.
+        """
         bk = bucket(bullets)
         sb = streak_bucket(self.streak)
         for k in self.c0:
@@ -449,7 +527,7 @@ class OppMemory:
         self.last = action
 
     def _comb(self, name, key=None):
-        """Live counts + (frozen base counts x base weight) of one table row."""
+        """Add the live counts and the frozen base counts of one table row."""
         out = defaultdict(float)
         for src, w in ((self, 1.0), (self.base, self.base_w)):
             if src is None or w <= 0:
@@ -462,14 +540,16 @@ class OppMemory:
         return out
 
     def dist(self, bullets, names, merge_bomb, last=_UNSET):
-        """
-        Empirical distribution restricted to `names`, smoothed hierarchically:
-        pooled frequencies -> (bullet bucket) -> (bullet bucket, last action).
-        Returns (dict | None, number of observations).
+        """Estimate how likely each action is for this opponent in its current situation.
+
+        Only the actions in `names` are considered.  The estimate starts from all moves, then is refined by
+        the bullet band and by the last move, each step weighted by how much data it has.  The result is
+        (probabilities or None, number of observations).
         """
         last = self.last if last is _UNSET else last
 
         def merged(row):
+            """Count Bomb as Shoot when the caller asks for that."""
             out = defaultdict(float)
             for k, v in row.items():
                 out["shoot" if (merge_bomb and k == "bomb") else k] += v
@@ -491,9 +571,10 @@ class OppMemory:
         return p, n_all
 
     def streak_def_prob(self, d=None):
-        """
-        P(this opponent defends AGAIN) after d Defense rounds in a row: the 50/33/15/5 % prior,
-        blended with what has really been observed at that streak.  None when d == 0.
+        """Estimate how likely this opponent is to defend again after its current Defense streak.
+
+        It starts from the prior 50 / 33 / 15 / 5 % for streaks of 1 / 2 / 3 / 4+ and moves toward what has
+        really been observed as data comes in.  The result is None when there is no streak.
         """
         d = self.streak if d is None else d
         if d <= 0:
@@ -505,17 +586,20 @@ class OppMemory:
         return (row.get("defense", 0.0) + STREAK_PRIOR_WEIGHT * pr) / (n + STREAK_PRIOR_WEIGHT), n
 
     def target_shares(self):
+        """Return how often this opponent has shot at each player."""
         tot = sum(self.tgt.values())
         if tot < 2.0:
             return None, tot
         return {k: v / tot for k, v in self.tgt.items()}, tot
 
     def scale_inplace(self, f):
+        """Multiply every count by f so that older games count less."""
         for row in [self.c0] + list(self.c1.values()) + list(self.c2.values()) + list(self.cs.values()) + [self.tgt]:
             for k in row:
                 row[k] *= f
 
     def to_json(self):
+        """Convert the counts to JSON for the memory files."""
         r4 = lambda row: {k: round(v, 4) for k, v in row.items()}
         return {"decay": self.DECAY, "c0": r4(self.c0),
                 "c1": {str(k): r4(v) for k, v in self.c1.items()},
@@ -525,6 +609,7 @@ class OppMemory:
 
     @classmethod
     def from_json(cls, d, decay=None):
+        """Rebuild a model from its JSON form."""
         m = cls(d.get("decay", 0.93) if decay is None else decay)
         m.c0.update(d.get("c0", {}))
         for k, row in d.get("c1", {}).items():
@@ -544,7 +629,10 @@ HUMAN_REST = {"reload": 1.0, "shoot": 0.25, "bomb": 0.10, "reflect": 0.10}
 
 
 def human_rest(names, emp=None, n=0.0):
-    """Split of the non-Defense moves: a human default, blended with what was really observed."""
+    """Split the probability of the non-Defense moves the way a human usually plays them.
+
+    It starts from a typical human split (mostly Reload) and blends in what this player has really done.
+    """
     base = {a: HUMAN_REST.get(a, 0.0) for a in names if a != "defense"}
     if "mg" in names:                                   # 10+ bullets: it will fire
         base["mg"] = 3.0
@@ -559,11 +647,11 @@ def human_rest(names, emp=None, n=0.0):
 
 
 def apply_streak(p, d, mem, rest_hint=None):
-    """
-    Re-weight an action distribution `p` ({action: prob}) so that P(Defense) follows the streak model
-    for a defense streak of d rounds.  The other actions share the rest in the proportions of
-    `rest_hint` (see human_rest) or, without a hint, in their old proportions.
-    Returns (new distribution, whether it was applied).
+    """Adjust an action distribution so that its Defense share follows the Defense-streak model.
+
+    `p` maps actions to probabilities.  The Defense share is set by the streak model and the other
+    actions share the rest, in the proportions of `rest_hint` if given.  The result is (new
+    distribution, whether it was applied).
     """
     if d <= 0 or "defense" not in p:
         return p, False
@@ -593,21 +681,35 @@ HUMAN_GAME_DECAY = 0.97
 
 
 def situation_key(my_bullets, max_opp_bullets, human_streak):
+    """Build the situation label that the win / loss lessons are stored under.
+
+    The label is: my bullet band | the richest opponent's bullet band | the human's Defense streak (0-3+).
+    """
     return f"{bucket(my_bullets)}|{bucket(max_opp_bullets)}|{min(int(human_streak), 3)}"
 
 
 class DecisionStats:
-    """Per situation and action: how much better or worse than expected the bot finished after choosing it."""
+    """Store how well each action worked out in each situation in earlier games.
+
+    For each situation and action it keeps how much better or worse than its fair share the bot
+    finished after choosing that action.
+    """
 
     def __init__(self):
+        """Create empty statistics."""
         self.t = {}           # key -> action -> [sum of advantage x weight, sum of weight]
 
     def add(self, key, action, adv, w):
+        """Record the outcome of one decision."""
         cell = self.t.setdefault(key, {}).setdefault(action, [0.0, 0.0])
         cell[0] += adv * w
         cell[1] += w
 
     def factor(self, key, action):
+        """Return the multiplier that the lessons give this action in this situation.
+
+        The factor lies within 1 +- LEARN_BETA and stays close to 1 while there is little evidence (LEARN_K).
+        """
         cell = self.t.get(key, {}).get(action)
         if not cell:
             return 1.0
@@ -615,16 +717,19 @@ class DecisionStats:
         return 1.0 + LEARN_BETA * m
 
     def decay(self, f):
+        """Make older games count less."""
         for acts in self.t.values():
             for cell in acts.values():
                 cell[0] *= f
                 cell[1] *= f
 
     def to_json(self):
+        """Convert the statistics to JSON."""
         return {k: {a: [round(c[0], 4), round(c[1], 4)] for a, c in acts.items()} for k, acts in self.t.items()}
 
     @classmethod
     def from_json(cls, d):
+        """Rebuild the statistics from their JSON form."""
         s = cls()
         s.t = {k: {a: list(c) for a, c in acts.items()} for k, acts in d.items()}
         return s
@@ -634,6 +739,7 @@ class DecisionStats:
 #  LAYER 1+2+3 - THE BOT
 # ============================================================================
 def softmax(vals, tau):
+    """Turn scores into probabilities, sharper for a small tau."""
     m = max(vals)
     e = [math.exp((v - m) / tau) for v in vals]
     s = sum(e)
@@ -641,6 +747,7 @@ def softmax(vals, tau):
 
 
 def sample_index(probs, rng):
+    """Draw a random index with the given probabilities."""
     r, acc = rng.random(), 0.0
     for i, p in enumerate(probs):
         acc += p
@@ -650,7 +757,11 @@ def sample_index(probs, rng):
 
 
 def eval_state(players, me_id):
-    """Value of a position for `me` in [-1, 1]. Exact (solved table) when 2 players remain."""
+    """Score a position for `me` between -1 (lost) and +1 (won).
+
+    With two players left the value comes exactly from the solved table; with more players it is a
+    heuristic based on bullets, Reflect and the number of players.
+    """
     me = next(p for p in players if p["id"] == me_id)
     live = [p for p in players if p["alive"]]
     if not live:
@@ -679,6 +790,11 @@ def eval_state(players, me_id):
 
 
 class ThinkingBot:
+    """Play as the game's bot, using the solved game, opponent models and look-ahead.
+
+    One bot is created per seat and match.  choose() picks the action for a round and observe() sees
+    what everybody did afterwards.  The layers are explained in the file header.
+    """
     LEVELS = {
         "easy":   dict(tau=0.45, mistake=0.35, exploit=0.0, tol=0.0,  samples=60),
         "normal": dict(tau=0.12, mistake=0.03, exploit=0.5,  tol=0.12, samples=100),
@@ -687,7 +803,10 @@ class ThinkingBot:
     PATTERN_ROUNDS = 8.0    # the 50/33/15/5 streak prior counts as this many observations when exploiting
 
     def __init__(self, pid, difficulty="normal", rng=None, samples=None, state=None):
-        """state = this bot slot's permanent memory (see BotStore.load); None = a fresh brain."""
+        """Create a bot for one seat with the settings of its difficulty level.
+
+        `state` is this seat's saved memory (see BotStore.load); None means the bot starts with no memory.
+        """
         self.pid = pid
         self.cfg = dict(self.LEVELS[difficulty])
         if samples:
@@ -702,11 +821,13 @@ class ThinkingBot:
 
     # ---- memory -----------------------------------------------------------
     def _mem(self, pid):
+        """Return this bot's in-game model of one opponent, creating it when needed."""
         if pid not in self.mem:
             self.mem[pid] = OppMemory()
         return self.mem[pid]
 
     def observe(self, players_before, actions):
+        """Update the opponent models and the bot's own Defense streak after a round."""
         for p in players_before:
             if p["alive"] and p["id"] != self.pid and p["id"] in actions:
                 a = actions[p["id"]]
@@ -716,7 +837,7 @@ class ThinkingBot:
             self.my_streak = self.my_streak + 1 if mine["action"] == "defense" else 0
 
     def _learn_factors(self, me, opps, names):
-        """Win/loss feedback from earlier games: one multiplier per action name (1.0 = no opinion)."""
+        """Return the multiplier for each action that the lessons from earlier games give."""
         if self.state is None:
             return {a: 1.0 for a in names}
         hm = self.mem.get(0)
@@ -726,6 +847,11 @@ class ThinkingBot:
 
     # ---- public API ---------------------------------------------------------
     def choose(self, players, round_no=0):
+        """Choose this bot's action for the round.
+
+        With one opponent left it uses the solved 2-player strategy, otherwise the Monte-Carlo look-ahead.
+        Defense and Reflect are not allowed when no opponent has a bullet, because they cannot help.
+        """
         me = next(p for p in players if p["id"] == self.pid)
         opps = [p for p in players if p["alive"] and p["id"] != self.pid]
         if not opps:
@@ -740,6 +866,13 @@ class ThinkingBot:
 
     # ---- 2 players left: solved game + safe exploitation --------------------
     def _duel(self, me, opp, ban=()):
+        """Choose an action when only one opponent is left.
+
+        Steps: 1) take the equilibrium mix of the solved position; 2) predict the opponent from its model,
+        plus the Defense-streak pattern for the human; 3) lean toward the best answer to that prediction,
+        but only as far as the worst case stays within `tol` of the equilibrium value; 4) apply the
+        lessons from earlier games; 5) mix in the difficulty's random mistakes.
+        """
         la, lo, x, y, v, A = duel_solution(me, opp, self.my_streak)
         mem = self._mem(opp["id"])
         emp, n = mem.dist(opp["bullets"], lo, merge_bomb=True)
@@ -785,6 +918,12 @@ class ThinkingBot:
 
     # ---- 3+ players: Monte-Carlo one-ply look-ahead with the real engine -----
     def _opp_profile(self, o, alive, viewer):
+        """Predict one opponent's next move for the look-ahead.
+
+        It starts from that opponent's own equilibrium against its most dangerous rival, adjusts it for
+        the number of armed players, and blends in what has been observed, plus the Defense-streak pattern
+        for the human.  The result is a list of (action, target, probability).
+        """
         rivals = [p for p in alive if p["id"] != o["id"]]
         rival = max(rivals, key=lambda p: (p["bullets"], p["id"] == viewer["id"]))
         la, lo, x, y, v, A = duel_solution(o, rival)
@@ -829,6 +968,12 @@ class ThinkingBot:
         return out
 
     def _melee(self, me, opps, players, ban=()):
+        """Choose an action when two or more opponents are left.
+
+        It draws `samples` guesses of everybody else's moves, plays every own action against each guess
+        with the real rules engine, and averages eval_state() of the results.  The final choice uses
+        softmax(tau), the lessons from earlier games and the difficulty's mistake rate.
+        """
         alive = [p for p in players if p["alive"]]
         rng, cfg = self.rng, self.cfg
         profiles_dist = {o["id"]: self._opp_profile(o, alive, me) for o in opps}
@@ -884,13 +1029,17 @@ class ThinkingBot:
 #  BASELINE BOTS (for the tournament / self-test only)
 # ============================================================================
 class RandomBot:
+    """Play a random legal action every round, as a baseline for testing."""
     def __init__(self, pid, rng=None):
+        """Create the baseline bot."""
         self.pid, self.rng = pid, rng or random.Random()
 
     def observe(self, *_):
+        """Ignore what happened, because this bot has no memory."""
         pass
 
     def choose(self, players, round_no=0):
+        """Choose a random legal action and a random target."""
         me = next(p for p in players if p["id"] == self.pid)
         a = self.rng.choice(legal_actions(me, players))
         tgt = None
@@ -900,26 +1049,35 @@ class RandomBot:
 
 
 class FixedBot:
-    """Always the same action (defense / reload) - a sanity baseline."""
+    """Play the same action every round, as a baseline for testing."""
     def __init__(self, pid, action):
+        """Create the baseline bot with its fixed action."""
         self.pid, self.action = pid, action
 
     def observe(self, *_):
+        """Ignore what happened, because this bot has no memory."""
         pass
 
     def choose(self, players, round_no=0):
+        """Return the fixed action."""
         return {"action": self.action, "target": None}
 
 
 class HeuristicBot:
-    """A 'sensible human' stand-in: reload when safe, shoot when ahead, MG at 10."""
+    """Play simple common-sense rules, as a stand-in for a sensible human in tests.
+
+    It reloads when that is safe, shoots when ahead, and fires the Machine Gun at 10 bullets.
+    """
     def __init__(self, pid, rng=None):
+        """Create the rule-based bot."""
         self.pid, self.rng = pid, rng or random.Random()
 
     def observe(self, *_):
+        """Ignore what happened, because this bot has no memory."""
         pass
 
     def choose(self, players, round_no=0):
+        """Choose an action by the simple rules."""
         me = next(p for p in players if p["id"] == self.pid)
         opps = [p for p in players if p["alive"] and p["id"] != self.pid]
         top = max(opps, key=lambda p: p["bullets"])
@@ -938,48 +1096,8 @@ class HeuristicBot:
         return {"action": "defense", "target": None}
 
 
-class OldProBot:
-    """The v8 'pro' 2-player AI, loaded from the v8 file for head-to-head comparison."""
-    def __init__(self, pid, fn):
-        self.pid, self.fn, self.hist = pid, fn, []
-
-    def observe(self, players_before, actions):
-        for p in players_before:
-            if p["id"] != self.pid and p["id"] in actions:
-                self.hist.append(actions[p["id"]]["action"])
-
-    def choose(self, players, round_no=0):
-        me = next(p for p in players if p["id"] == self.pid)
-        opp = next(p for p in players if p["alive"] and p["id"] != self.pid)
-        a = self.fn(me["bullets"], opp["bullets"], me["has_reflect"], list(self.hist))
-        return {"action": a, "target": opp["id"] if a in ("shoot", "mg") else None}
-
-
-def load_old_pro():
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "007-premode-pygamev8.py")
-    if not os.path.exists(path):
-        return None
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("seven_v8", path)
-    mod = importlib.util.module_from_spec(spec)
-    old_argv, old_drv, old_wb = sys.argv, os.environ.get("SDL_VIDEODRIVER"), sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
-    os.environ["SDL_VIDEODRIVER"] = "dummy"
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        return None
-    finally:
-        sys.argv = old_argv
-        sys.dont_write_bytecode = old_wb
-        if old_drv is None:
-            os.environ.pop("SDL_VIDEODRIVER", None)
-    return getattr(mod, "computer_decide_action_2player_pro", None)
-
-
 # ============================================================================
-#  PERMANENT BOT MEMORY + GAME RECORDS  (v10)
+#  PERMANENT BOT MEMORY + GAME RECORDS
 # ============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATA_DIR = os.path.join(SCRIPT_DIR, "bot_data_v10")
@@ -993,24 +1111,27 @@ TUNABLE_DEFAULTS = {"STREAK_PRIOR_WEIGHT": 6.0, "PATTERN_ROUNDS": 8.0}
 
 
 def apply_params(params):
-    """Put the tuned variables into force (module global + bot class attribute)."""
+    """Put the tuned variables into force."""
     global STREAK_PRIOR_WEIGHT
     STREAK_PRIOR_WEIGHT = float(params["STREAK_PRIOR_WEIGHT"])
     ThinkingBot.PATTERN_ROUNDS = float(params["PATTERN_ROUNDS"])
 
 
 def new_bot_state(slot):
+    """Create the empty memory of one bot seat."""
     return {"slot": slot, "modes": list(SLOT_MODES[slot]), "games": 0, "wins": 0, "losses": 0, "draws": 0,
             "human": OppMemory(decay=1.0), "learn": DecisionStats()}
 
 
 def bot_state_to_json(st):
+    """Convert a bot seat's memory to JSON."""
     return {"version": 1, "slot": st["slot"], "modes_players": st["modes"],
             "games": st["games"], "bot_wins": st["wins"], "bot_losses": st["losses"], "draws": st["draws"],
             "human_model": st["human"].to_json(), "decision_stats": st["learn"].to_json()}
 
 
 def bot_state_from_json(d, slot):
+    """Rebuild a bot seat's memory from its JSON form."""
     st = new_bot_state(slot)
     st["games"], st["wins"] = d.get("games", 0), d.get("bot_wins", 0)
     st["losses"], st["draws"] = d.get("bot_losses", 0), d.get("draws", 0)
@@ -1020,14 +1141,15 @@ def bot_state_from_json(d, slot):
 
 
 def apply_record(st, rec, weight=1.0, sim=False):
-    """
-    Learn from one finished game.  Used live after every game AND by 007-train-bot.py, so both give
-    identical results.  Rebuilds the game from the recorded actions with the real rules engine.
-      * human model of this bot slot: what the human did, per bullet bucket / last action / defense streak
-      * decision statistics: after a loss (win) the bot's late decisions get less (more) likely in the
-        same situation; credit is relative to the fair share 1/n
-    sim=True  : game against a simulated human - learn decision statistics only (weight is usually < 1).
-    Returns False when this bot slot did not take part in the game.
+    """Let one bot seat learn from one finished game.
+
+    The game is rebuilt from its recorded actions with the real rules engine.  The same function is
+    used after every game and by 007-train-bot.py, so both give identical results.
+      * The seat's model of the human counts what the human did.
+      * After a loss (win) the bot's late decisions become less (more) likely in the same situation,
+        measured against the fair share 1/n.
+    With sim=True (a practice game against a simulated human) only the lessons are learned, usually
+    with a weight below 1.  It returns False when this seat did not take part in the game.
     """
     slot, n = st["slot"], rec["n"]
     if slot >= n:
@@ -1069,6 +1191,7 @@ def apply_record(st, rec, weight=1.0, sim=False):
 
 
 def make_record(rec_id, cfg, n, history, winner):
+    """Build the record of a finished game that is saved and can be replayed."""
     return {"v": 1, "id": rec_id, "time": time.strftime("%Y-%m-%d %H:%M:%S"), "n": n, "mode": n - 1,
             "difficulty": cfg.get("difficulty", "normal"), "timer": cfg.get("timer", 10), "winner": winner,
             "rounds": [{str(pid): {"action": a["action"], "target": a.get("target")} for pid, a in r.items()}
@@ -1076,16 +1199,23 @@ def make_record(rec_id, cfg, n, history, winner):
 
 
 class BotStore:
-    """Files: <dir>/bot1_memory.json ... bot4_memory.json and <dir>/game_records.jsonl (one game per line)."""
+    """Read and write the bots' memory files and the game records.
+
+    The folder holds bot1_memory.json ... bot4_memory.json, game_records.jsonl (one game per line)
+    and tuned_params.json.
+    """
 
     def __init__(self, data_dir=None):
+        """Use the given data folder, or bot_data_v10 next to this file."""
         self.dir = data_dir or DEFAULT_DATA_DIR
         self.records_path = os.path.join(self.dir, "game_records.jsonl")
 
     def memory_path(self, slot):
+        """Return the path of one seat's memory file."""
         return os.path.join(self.dir, f"bot{slot}_memory.json")
 
     def load(self, slot):
+        """Load one seat's memory, or an empty memory if there is no usable file."""
         try:
             with open(self.memory_path(slot), encoding="utf-8") as f:
                 return bot_state_from_json(json.load(f), slot)
@@ -1093,6 +1223,7 @@ class BotStore:
             return new_bot_state(slot)
 
     def save(self, st):
+        """Save one seat's memory safely through a temporary file."""
         os.makedirs(self.dir, exist_ok=True)
         path = self.memory_path(st["slot"])
         with open(path + ".tmp", "w", encoding="utf-8") as f:
@@ -1100,6 +1231,7 @@ class BotStore:
         os.replace(path + ".tmp", path)
 
     def records(self):
+        """Return every recorded game, skipping damaged lines."""
         out = []
         try:
             with open(self.records_path, encoding="utf-8") as f:
@@ -1115,14 +1247,17 @@ class BotStore:
         return out
 
     def next_id(self):
+        """Return the number of the next game record."""
         return len(self.records()) + 1
 
     # ---- tuned variables (written by 007-train-bot.py after every game) ------
     @property
     def params_path(self):
+        """Return the path of the tuned-variables file."""
         return os.path.join(self.dir, "tuned_params.json")
 
     def load_params(self):
+        """Load the tuned variables, using the defaults where the file has none."""
         out = dict(TUNABLE_DEFAULTS)
         try:
             with open(self.params_path, encoding="utf-8") as f:
@@ -1136,13 +1271,14 @@ class BotStore:
         return out
 
     def save_params(self, params):
+        """Save the tuned variables safely through a temporary file."""
         os.makedirs(self.dir, exist_ok=True)
         with open(self.params_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(params, f, indent=1)
         os.replace(self.params_path + ".tmp", self.params_path)
 
     def add_game(self, rec):
-        """Append the record, let every bot slot that played learn from it, save everything."""
+        """Save a finished game and let every bot seat that played learn from it."""
         os.makedirs(self.dir, exist_ok=True)
         with open(self.records_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
@@ -1154,6 +1290,7 @@ class BotStore:
 
     @staticmethod
     def summary(records):
+        """Count the recorded games, wins, losses and draws."""
         s = {"games": len(records), "wins": 0, "losses": 0, "draws": 0, "by_mode": {}}
         for r in records:
             w = r.get("winner")
@@ -1165,20 +1302,26 @@ class BotStore:
 
 
 class CloneBot:
-    """Plays like the recorded human (a sampled copy of a bot's human model).  Used by 007-train-bot.py."""
+    """Play like the recorded human, for the trainer's practice games.
+
+    It samples moves from a bot's model of the human and is used by 007-train-bot.py.
+    """
 
     def __init__(self, pid, model, rng=None):
+        """Create a copy of the human from a bot's model of them."""
         self.pid, self.model = pid, model
         self.rng = rng or random.Random()
         self.last, self.streak = None, 0
 
     def observe(self, players_before, actions):
+        """Track this player's own last move and Defense streak."""
         a = actions.get(self.pid)
         if a:
             self.streak = self.streak + 1 if a["action"] == "defense" else 0
             self.last = a["action"]
 
     def choose(self, players, round_no=0):
+        """Choose a move the way the recorded human tends to."""
         me = next(p for p in players if p["id"] == self.pid)
         acts = legal_actions(me, players)
         emp, n = self.model.dist(me["bullets"], acts, merge_bomb=False, last=self.last)
@@ -1199,7 +1342,10 @@ class CloneBot:
 #  HEADLESS TOOLS: self-test, tournament, solver
 # ============================================================================
 def play_headless(bots, n_players, max_rounds=150):
-    """bots = {pid: bot}. Returns winner pid, or None for a draw / stalemate."""
+    """Play one game between bots without a window and return the winner.
+
+    `bots` maps player ids to bots.  It returns the winner's id, or None for a draw or a stalemate.
+    """
     players = [make_player(i, f"P{i}") for i in range(n_players)]
     for rnd in range(1, max_rounds + 1):
         if len(alive_players(players)) <= 1:
@@ -1215,20 +1361,27 @@ def play_headless(bots, n_players, max_rounds=150):
 
 
 def run_selftest():
+    """Run the built-in checks of the rules, the solver, the bots and the memory.
+
+    It is started with --selftest, prints PASS or FAIL for every check and works in a temporary folder.
+    """
     ok = True
 
     def check(name, cond):
+        """Print PASS or FAIL for one check and remember any failure."""
         nonlocal ok
         print(("  PASS  " if cond else "  FAIL  ") + name)
         ok &= bool(cond)
 
     def mk(*bullets):
+        """Create players with the given bullet counts."""
         ps = [make_player(i, f"P{i}") for i in range(len(bullets))]
         for p, b in zip(ps, bullets):
             p["bullets"] = b
         return ps
 
     def R(ps, **acts):
+        """Resolve a round with actions given as keyword arguments."""
         return resolve_round(ps, {int(k[1:]): v for k, v in acts.items()})
 
     print("Rules engine")
@@ -1317,6 +1470,7 @@ def run_selftest():
     check("memory JSON round trip keeps the model", abs(d1[1] - d2[1]) < 0.01 and all(abs(d1[0][a] - d2[0][a]) < 0.01 for a in d1[0]))
 
     def bot_vs_human(streak_len):
+        """Return the bot's mix after it has seen the human defend a given number of times."""
         bot = ThinkingBot(0, "hard", rng=random.Random(5))
         hm = bot._mem(1)
         for _ in range(streak_len):
@@ -1335,6 +1489,7 @@ def run_selftest():
         store = BotStore(tmp)
 
         def rec(n, winner):
+            """Build a short test game record."""
             hist = [{i: {"action": "reload", "target": None} for i in range(n)},
                     {i: {"action": "defense", "target": None} for i in range(n)}]
             return make_record(store.next_id(), {"difficulty": "hard", "timer": 10}, n, hist, winner)
@@ -1365,11 +1520,12 @@ def run_selftest():
 
 
 def run_tournament(games, samples=60):
+    """Measure the bots' strength against the baseline bots."""
     rng = random.Random(7)
-    old_fn = load_old_pro()
     print(f"Tournament: {games} games per match-up (draw/stalemate counted separately)\n")
 
     def duel(name, make_a, make_b):
+        """Play one 1-against-1 match-up, alternating the seats."""
         w = [0, 0, 0]
         for g in range(games):
             flip = g % 2
@@ -1393,15 +1549,10 @@ def run_tournament(games, samples=60):
         duel(f"{lvl:<6} bot vs always-defend", mkb, lambda pid: FixedBot(pid, "defense"))
         duel(f"{lvl:<6} bot vs always-reload", mkb, lambda pid: FixedBot(pid, "reload"))
         duel(f"{lvl:<6} bot vs heuristic 'sensible human'", mkb, lambda pid: HeuristicBot(pid, random.Random(rng.random())))
-        if old_fn:
-            duel(f"{lvl:<6} bot vs v8 'pro' bot", mkb, lambda pid: OldProBot(pid, old_fn))
         print(f"    ({time.time() - t0:.1f}s)")
     duel("hard bot vs hard bot (mirror, expect ~0.5)",
          lambda pid: ThinkingBot(pid, "hard", random.Random(rng.random())),
          lambda pid: ThinkingBot(pid, "hard", random.Random(rng.random())))
-    if old_fn:
-        duel("v8 'pro' bot vs random (reference)", lambda pid: OldProBot(pid, old_fn),
-             lambda pid: RandomBot(pid, random.Random(rng.random())))
 
     print("\nMulti-player (focal hard bot in seat 0; fair share would be 1/N)")
     for n, g in ((3, max(10, games // 3)), (5, max(6, games // 6))):
@@ -1422,6 +1573,7 @@ def run_tournament(games, samples=60):
 
 
 def run_solve():
+    """Re-solve the 2-player game and print the text to embed in this file."""
     t0 = time.time()
     V = compute_value_table(verbose=True)
     s = pack_table(V)
@@ -1455,9 +1607,6 @@ _V2P_B64 = (
 # ============================================================================
 #  UI - everything below needs pygame
 # ============================================================================
-OPTS = argparse.Namespace(autoplay=False, headless=False, shots=None, games=0, fast=False,
-                          mode=1, difficulty="normal", timer=10, skip_tutorial=False, seed=None,
-                          data_dir=None)
 W, H = 1280, 720
 
 C_BG = (11, 13, 30)
@@ -1484,25 +1633,28 @@ SHOTS_TAKEN = set()
 
 
 class QuitGame(Exception):
+    """Signal that the window was closed."""
     pass
 
 
 class ReturnToMenu(Exception):
-    """Raised from pump_events when the player ends the running match from the in-game MENU button."""
+    """Signal that the player left the running match."""
 
 
 class ReplayStop(Exception):
-    """Raised from pump_events when Esc is pressed during a replay."""
+    """Signal that the player stopped a replay."""
 
 
 MENU_BTN = pygame.Rect(W - 134, 56, 110, 32) if pygame else None
 
 
 def speed():
+    """Return the animation speed factor."""
     return 4.0 if OPTS.fast else 1.0
 
 
 def snap(ctx, tag):
+    """Save a screenshot of a key screen when testing with --shots."""
     if OPTS.shots and tag not in SHOTS_TAKEN:
         SHOTS_TAKEN.add(tag)
         os.makedirs(OPTS.shots, exist_ok=True)
@@ -1510,20 +1662,25 @@ def snap(ctx, tag):
 
 
 def lerp(a, b, t):
+    """Return the point a fraction t of the way from a to b."""
     return a + (b - a) * t
 
 
 def lerp_col(c1, c2, t):
+    """Mix two colours by the fraction t."""
     return tuple(int(lerp(c1[i], c2[i], t)) for i in range(3))
 
 
 def ease_out(t):
+    """Shape an animation so it starts fast and stops softly."""
     t = max(0.0, min(1.0, t))
     return 1 - (1 - t) ** 3
 
 
 class Ctx:
+    """Hold everything that the screens share."""
     def __init__(self, screen, fonts, clock):
+        """Create the shared state for a new window."""
         self.screen, self.fonts, self.clock = screen, fonts, clock
         self.cfg = {}
         self.log = []
@@ -1544,7 +1701,7 @@ class Ctx:
 
 
 def _find_font(bold):
-    """Direct font-file lookup (pygame.font.SysFont can crash on some Windows installs)."""
+    """Find a font file on this computer."""
     wdir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
     names = (["segoeuib.ttf", "arialbd.ttf", "calibrib.ttf", "simhei.ttf"] if bold else
              ["segoeui.ttf", "arial.ttf", "calibri.ttf", "simhei.ttf"])
@@ -1557,9 +1714,11 @@ def _find_font(bold):
 
 
 def load_fonts():
+    """Load the fonts the game uses in every size."""
     reg, bold = _find_font(False), _find_font(True)
 
     def f(sz, b=False):
+        """Load one font size, falling back to pygame's default font."""
         path = (bold if b else reg) or reg or bold
         try:
             return pygame.font.Font(path, sz) if path else pygame.font.Font(None, int(sz * 1.2))
@@ -1570,6 +1729,7 @@ def load_fonts():
 
 
 def text(ctx, font, s, pos, color=C_TEXT, anchor="topleft", shadow=False, alpha=255):
+    """Draw a text at a position given by one point of its box."""
     surf = ctx.fonts[font].render(str(s), True, color)
     if alpha < 255:
         surf.set_alpha(alpha)
@@ -1584,6 +1744,7 @@ def text(ctx, font, s, pos, color=C_TEXT, anchor="topleft", shadow=False, alpha=
 
 
 def wrap(ctx, font, s, width):
+    """Split a text into lines that fit a given width."""
     words, lines, cur = s.split(), [], ""
     for w in words:
         t = (cur + " " + w).strip()
@@ -1598,10 +1759,12 @@ def wrap(ctx, font, s, width):
 
 
 def rrect(surf, rect, color, radius=14, width=0):
+    """Draw a rounded rectangle, filled or as an outline."""
     pygame.draw.rect(surf, color, rect, width=width, border_radius=radius)
 
 
 def glow(surf, pos, radius, color, alpha=90):
+    """Draw a soft round glow."""
     s = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
     for i in range(6, 0, -1):
         pygame.draw.circle(s, (*color, int(alpha * i / 6 / 2)), (radius, radius), int(radius * i / 6))
@@ -1609,7 +1772,7 @@ def glow(surf, pos, radius, color, alpha=90):
 
 
 def draw_icon(surf, kind, cx, cy, r, color):
-    """Procedural action icons (no font / image dependencies)."""
+    """Draw the icon of an action."""
     lw = max(2, int(r * 0.16))
     if kind == "reload":
         rect = pygame.Rect(cx - r * 0.75, cy - r * 0.75, r * 1.5, r * 1.5)
@@ -1648,10 +1811,6 @@ def draw_icon(surf, kind, cx, cy, r, color):
                                           (cx - r * 0.7, cy + r * 0.25)])
 
 
-def draw_pip_shield(surf, cx, cy, r, color):
-    draw_icon(surf, "defense", cx, cy, r, color)
-
-
 # ---------------------------------------------------------------------------
 #  Table (players on screen)
 # ---------------------------------------------------------------------------
@@ -1660,6 +1819,10 @@ AV_R = 44
 
 
 def layout(players, viewer_id):
+    """Compute where every player is drawn on the screen.
+
+    The opponents stand in a row at the top and the viewer lower in the middle.
+    """
     pos = {}
     others = [p for p in players if p["id"] != viewer_id]
     k = len(others)
@@ -1671,12 +1834,17 @@ def layout(players, viewer_id):
 
 
 def avatar_color(p):
+    """Return the fixed colour of a player's seat."""
     return AVATAR_COLORS[p["id"] % len(AVATAR_COLORS)]
 
 
 def draw_table(ctx, players, pos, *, alive_vis=None, bubbles=None, rings=None, tnow=0.0, shake=None,
                bullets_vis=None, number_badges=None, dim=False):
-    """alive_vis: {pid: bool}; bubbles: {pid: (action, target_name, scale)}; rings: {pid: color}."""
+    """Draw all players with their bullets, Reflect status and action bubbles.
+
+    alive_vis maps ids to whether the player is still shown alive, bubbles maps ids to
+    (action, target name, scale), and rings maps ids to a highlight colour.
+    """
     s = ctx.screen
     for p in players:
         pid = p["id"]
@@ -1705,7 +1873,7 @@ def draw_table(ctx, players, pos, *, alive_vis=None, bubbles=None, rings=None, t
         if alive:
             draw_icon(s, "shoot", int(x - 28), int(by + 9), 13, bc)
             text(ctx, "med", f"{b}", (x - 10, by - 6), bc)
-            draw_pip_shield(s, int(x + 32), int(by + 9), 10, C_PURPLE if p["has_reflect"] else (75, 78, 100))
+            draw_icon(s, "defense", int(x + 32), int(by + 9), 10, C_PURPLE if p["has_reflect"] else (75, 78, 100))   # Reflect still available?
             if b >= MG_COST:
                 text(ctx, "tiny", "MG READY", (x + 50, by + 9), C_RED, "midleft")
         if rings and pid in rings and alive:
@@ -1732,6 +1900,7 @@ def draw_table(ctx, players, pos, *, alive_vis=None, bubbles=None, rings=None, t
 
 
 def draw_header(ctx, round_no, right_text=""):
+    """Draw the background, the round number, the mode label and the MENU button."""
     s = ctx.screen
     s.fill(C_BG)
     for i in range(0, H, 4):                     # subtle scanlines
@@ -1752,7 +1921,10 @@ PROB_ROW_H = 76
 
 
 def draw_log(ctx):
-    """Left column: the log on top; below it (own panels) the bots' probabilities, hidden until SHOW P is clicked."""
+    """Draw the side log and, when SHOW P is on, the bots' probabilities.
+
+    The log is on top; the bots' probabilities appear in their own panels below it.
+    """
     s = ctx.screen
     bottom = 470
     pp = None
@@ -1801,13 +1973,17 @@ def draw_log(ctx):
 
 
 def elim_text(names):
-    """'You are eliminated' / 'Bot 1 eliminated' / 'You and Bot 1 are eliminated'."""
+    """Build the banner text that says who was eliminated.
+
+    Examples: 'You are eliminated', 'Bot 1 eliminated', 'You and Bot 1 are eliminated'.
+    """
     if len(names) == 1:
         return f"{names[0]} are eliminated" if names[0] == "You" else f"{names[0]} eliminated"
     return ", ".join(names[:-1]) + f" and {names[-1]} " + ("are eliminated" if "You" in names else "eliminated")
 
 
 def describe_events(players, outcome):
+    """Describe a round in plain words for the side log."""
     names = {p["id"]: p["name"] for p in players}
     lines = []
     acts = outcome["actions"]
@@ -1839,13 +2015,17 @@ def describe_events(players, outcome):
 #  Buttons
 # ---------------------------------------------------------------------------
 def button_rects():
+    """Return the positions of the six action buttons."""
     w, h, gap = 178, 150, 14
     x0 = (W - (6 * w + 5 * gap)) // 2
     return {a: pygame.Rect(x0 + i * (w + gap), 538, w, h) for i, a in enumerate(ACT_ORDER)}
 
 
 def button_state(a, me, players):
-    """returns (enabled, cost_label, reason)"""
+    """Tell whether an action button can be used and what it costs.
+
+    It returns (enabled, cost label, reason why it is disabled).
+    """
     b = me["bullets"]
     bc = bomb_cost(players)
     if a == "reload":
@@ -1862,6 +2042,7 @@ def button_state(a, me, players):
 
 
 def draw_buttons(ctx, me, players, *, hover=None, selected=None, locked=False):
+    """Draw the six action buttons."""
     s = ctx.screen
     for a, r in button_rects().items():
         ok, cost, why = button_state(a, me, players)
@@ -1888,7 +2069,10 @@ def draw_buttons(ctx, me, players, *, hover=None, selected=None, locked=False):
 #  Human turn
 # ---------------------------------------------------------------------------
 def confirm_menu(ctx):
-    """Modal 'end this match?' dialog. Returns True to leave the match. Time spent here is not charged to the round timer."""
+    """Ask whether the player really wants to leave the match.
+
+    It returns True to leave the match.  Time spent in this dialog is not charged to the round timer.
+    """
     t0 = time.time()
     snapshot = ctx.screen.copy()
     box = pygame.Rect(0, 0, 520, 220)
@@ -1930,6 +2114,11 @@ def confirm_menu(ctx):
 
 
 def pump_events(ctx):
+    """Read this frame's window events and handle the ones that apply on every screen.
+
+    It handles closing the window, the MENU and SHOW P buttons and Esc during a replay, and returns
+    the remaining events.
+    """
     evs = pygame.event.get()
     shown, ctx.btn_shown = ctx.btn_shown, False
     pshown, ctx.pbtn_shown = ctx.pbtn_shown, False
@@ -1956,20 +2145,29 @@ _SCAN_TO_KEY = None
 
 
 def key_of(e):
-    """Key code of a KEYDOWN event.  An active input method (IME, e.g. Chinese) can swallow the letter and
-    deliver 'unknown key' (0); then fall back to the physical key position (scancode) of letters / digits / Esc."""
+    """Return the key of a key press, even when an input method hides it.
+
+    An active input method (for example Chinese) can swallow a key and report 'unknown key'.  Then the
+    physical key position is used for letters, digits, Esc, Space, Enter and the right arrow.
+    """
     if e.key:
         return e.key
     global _SCAN_TO_KEY
     if _SCAN_TO_KEY is None:
         _SCAN_TO_KEY = {pygame.KSCAN_ESCAPE: pygame.K_ESCAPE, pygame.KSCAN_SPACE: pygame.K_SPACE,
-                        pygame.KSCAN_RETURN: pygame.K_RETURN, pygame.KSCAN_RIGHT: pygame.K_RIGHT}   # v10.2: Space / Enter too
+                        pygame.KSCAN_RETURN: pygame.K_RETURN, pygame.KSCAN_RIGHT: pygame.K_RIGHT}   # Space / Enter too (an IME can swallow them)
         for ch in "abcdefghijklmnopqrstuvwxyz123456789":
             _SCAN_TO_KEY[getattr(pygame, "KSCAN_" + ch.upper())] = getattr(pygame, "K_" + ch)
     return _SCAN_TO_KEY.get(getattr(e, "scancode", None), 0)
 
 
 def human_turn(ctx, me, players, round_no, hotseat=False):
+    """Let the player choose an action, and a target if needed, for one round.
+
+    The player first picks an action with a button or key, then a target for Shoot or Machine Gun.
+    When the timer runs out, the choice is Reload, or a Machine Gun at a random opponent with 10 or
+    more bullets.
+    """
     cfg = ctx.cfg
     limit = cfg["timer"]
     pos = layout(players, me["id"])
@@ -1985,6 +2183,7 @@ def human_turn(ctx, me, players, round_no, hotseat=False):
     mode_label = ctx.cfg["label"]
 
     def finish(action, target=None):
+        """Package an action and its target."""
         return {"action": action, "target": target}
 
     while True:
@@ -2072,6 +2271,7 @@ def human_turn(ctx, me, players, round_no, hotseat=False):
 
 
 def pass_screen(ctx, name, color):
+    """Show the 'pass the device' screen between two players in Testing mode."""
     t0 = time.time()
     ctx.btn_shown = False                          # this screen has no MENU button
     while True:
@@ -2097,11 +2297,17 @@ def pass_screen(ctx, name, color):
 #  Reveal animation
 # ---------------------------------------------------------------------------
 def build_schedule(pos, acts, outcome):
+    """Plan the animation of a round as a list of timed pieces.
+
+    The pieces are bullets, shields, bursts and beams.  It returns (pieces, {id: time of death},
+    end time).
+    """
     T0, TR = 1.05, 0.55
     sched, death = [], {}
     k = 0
 
     def col_of(pid):
+        """Return the colour of a player's chosen action."""
         return ACT_COLOR[acts[pid]["action"]]
     for pid, a in acts.items():
         if a["action"] == "bomb":
@@ -2142,6 +2348,7 @@ def build_schedule(pos, acts, outcome):
 
 
 def draw_sched(ctx, sched, t):
+    """Draw the animation pieces that are visible at time t."""
     s = ctx.screen
     for it in sched:
         lt = t - it["t0"]
@@ -2183,6 +2390,11 @@ def draw_sched(ctx, sched, t):
 
 
 def play_reveal(ctx, players_before, outcome, viewer_id, wait_click):
+    """Animate the result of one round.
+
+    It shows everybody's action, the shots and their results, then the result banner.  Space or Enter
+    jumps to the end; with wait_click it then waits for one more press.
+    """
     pos = layout(players_before, viewer_id)
     acts = outcome["actions"]
     names = {p["id"]: p["name"] for p in players_before}
@@ -2256,6 +2468,12 @@ def play_reveal(ctx, players_before, outcome, viewer_id, wait_click):
 #  Match loop
 # ---------------------------------------------------------------------------
 def run_match(ctx):
+    """Play one whole match and return its result and history.
+
+    It creates the bots with their saved memory.  Every round the bots choose, the human(s) choose, the
+    round is resolved and animated, and the bots observe the result.  It returns (players, rounds,
+    action history).
+    """
     cfg = ctx.cfg
     n = cfg["opponents"] + 1
     hot = cfg["hotseat"]
@@ -2305,7 +2523,7 @@ def run_match(ctx):
 
 
 def _wait_next(ctx):
-    """End of a replayed round: wait for ONE Space / Enter / click (Esc stops the replay via pump_events)."""
+    """Wait for one key press or click at the end of a replayed round."""
     text(ctx, "body", "Click or press Space for the next round", (W // 2, 640), C_GOLD, "midtop")
     t0 = time.time()
     while True:
@@ -2319,8 +2537,11 @@ def _wait_next(ctx):
 
 
 def replay_game(ctx, rec):
-    """Watch a recorded game again with ONE press per round: a press during the animation goes straight
-    to the next round; after the animation the round waits for one press.  Esc = stop."""
+    """Replay a recorded game round by round.
+
+    A press during the animation goes straight to the next round; after the animation the round waits
+    for one press.  Esc stops the replay.
+    """
     n = rec["n"]
     players = [make_player(i, "You" if i == 0 else f"Bot {i}", i == 0) for i in range(n)]
     old_cfg, old_in = ctx.cfg, ctx.in_match
@@ -2347,6 +2568,7 @@ def replay_game(ctx, rec):
 
 
 def stats_line(stats):
+    """Summarise the recorded games in one line for the setup screen."""
     if not stats["games"]:
         return "No games recorded yet - your first one is about to be saved."
     return (f"Games played: {stats['games']}   |   you won {stats['wins']}   "
@@ -2354,6 +2576,10 @@ def stats_line(stats):
 
 
 def game_over(ctx, players, rounds, rec=None):
+    """Show the result screen and return the player's next choice.
+
+    It returns 'replay', 'again', 'menu' or 'quit'.
+    """
     live = alive_players(players)
     if len(live) == 1:
         w = live[0]
@@ -2414,7 +2640,7 @@ def game_over(ctx, players, rounds, rec=None):
 # ---------------------------------------------------------------------------
 #  Tutorial and menu
 # ---------------------------------------------------------------------------
-TUTORIAL = [                                    # v10.2: two pages
+TUTORIAL = [                                    # (title, lines): page 1 = title page, page 2 = Instruction
     ("007", ["Multi-round simultaneous decision games, see who's the last to survive."]),
     ("Instruction", None),
 ]
@@ -2428,8 +2654,6 @@ INSTRUCTION_COLS = [
      ("bomb", "-(living players - 1) bullets, shoot everyone else"),
      ("mg", "-10 bullets, neglect defense and reflect")],
 ]
-INSTRUCTION_NAME = {"reload": "Reload", "shoot": "Shoot", "defense": "Defense", "bomb": "Bomb",
-                    "reflect": "Reflect", "mg": "Machine Gun"}
 
 # Hover demo on the Instruction page: a tiny looping round played by the real rules engine and the real
 # round animation.  (bullets per player, {player: (action, target)}, caption)
@@ -2445,7 +2669,10 @@ _DEMO_CACHE = {}
 
 
 def _demo_round(a):
-    """(players before, outcome) of the demo scene of action a, computed once with the real rules."""
+    """Compute the demo round of one action with the real rules, once.
+
+    It returns (players before the round, outcome).
+    """
     if a not in _DEMO_CACHE:
         bullets, acts, _ = DEMO_SCENES[a]
         players = [make_player(i, "You" if i == 0 else f"Bot {i}", i == 0) for i in range(len(bullets))]
@@ -2457,7 +2684,10 @@ def _demo_round(a):
 
 
 def draw_action_demo(ctx, a, panel, t):
-    """Popup panel with the looping demo of action a; t = seconds since the mouse arrived on the card."""
+    """Draw the looping demo of one action in a popup panel.
+
+    `t` is the time in seconds since the mouse arrived on the card; the demo loops.
+    """
     players, out = _demo_round(a)
     n = len(players)
     cy = panel.y + 118
@@ -2469,7 +2699,7 @@ def draw_action_demo(ctx, a, panel, t):
     t = t % (end + 1.3)                                  # loop: the round, then a short pause
     rrect(ctx.screen, panel, (14, 17, 38), 16)
     rrect(ctx.screen, panel, ACT_COLOR[a], 16, 2)
-    text(ctx, "med", INSTRUCTION_NAME[a], (panel.centerx, panel.y + 12), ACT_COLOR[a], "midtop")
+    text(ctx, "med", ACT_NAME[a].title(), (panel.centerx, panel.y + 12), ACT_COLOR[a], "midtop")
     after = {p["id"]: p for p in out["players"]}
     for p in players:
         x, y = pos[p["id"]]
@@ -2500,16 +2730,18 @@ ACTION_HELP = {
 
 
 # ---------------------------------------------------------------------------
-#  v10.2: forest background for the title page
-#  forest_bg_v10.2.png is made from "Forest background.png" by make_forest_bg.py (mountains removed,
-#  solid white tree contours on a night sky).  If the file is missing, the page uses the plain background.
+#  Title page background: forest_bg_v10.2.png (pine forest at night, white tree contours).
+#  Optional: if the file is missing, the title page uses the plain background.
 # ---------------------------------------------------------------------------
 FOREST_FILE = os.path.join(SCRIPT_DIR, "forest_bg_v10.2.png")
 _FOREST = None
 
 
 def forest_bg():
-    """Loaded once, then reused every frame.  None when the image file is missing or unreadable."""
+    """Return the title page background image, loading it on first use.
+
+    It returns None when the image file is missing or cannot be read.
+    """
     global _FOREST
     if _FOREST is None:
         try:
@@ -2521,6 +2753,7 @@ def forest_bg():
 
 
 def tutorial(ctx):
+    """Show the two introduction pages."""
     page = 0
     btn_next = pygame.Rect(W // 2 + 20, H - 100, 260, 64)
     btn_back = pygame.Rect(W // 2 - 280, H - 100, 260, 64)
@@ -2555,7 +2788,7 @@ def tutorial(ctx):
         title, lines = TUTORIAL[page]
         bg = forest_bg() if page == 0 else None
         if bg is not None:
-            ctx.screen.blit(bg, (0, 0))                  # v10.2: forest behind the title page
+            ctx.screen.blit(bg, (0, 0))                  # forest behind the title page
         else:
             ctx.screen.fill(C_BG)
         text(ctx, "title" if page == 0 else "big", title, (W // 2, 18 if page else 80), C_GOLD, "midtop", shadow=True)
@@ -2582,7 +2815,7 @@ def tutorial(ctx):
                     rrect(ctx.screen, key, (28, 33, 68), 8)
                     rrect(ctx.screen, key, ACT_COLOR[a], 8, 2)
                     text(ctx, "body", ACT_KEY[a], key.center, ACT_COLOR[a], "center")
-                    text(ctx, "med", INSTRUCTION_NAME[a], (key.right + 12, key.centery), ACT_COLOR[a], "midleft")
+                    text(ctx, "med", ACT_NAME[a].title(), (key.right + 12, key.centery), ACT_COLOR[a], "midleft")
                     for j, wl in enumerate(wrap(ctx, "body", desc, r.right - (r.x + 92) - 16)):
                         text(ctx, "body", wl, (r.x + 92, r.y + 58 + j * 26), C_TEXT)
             text(ctx, "body", "Note: bullet cancellation!      MG-MG: TIE!", (W // 2, 488), C_GOLD, "midtop")
@@ -2612,7 +2845,8 @@ def tutorial(ctx):
 
 
 def menu(ctx, cfg):
-    cfg["opponents"] = 4                              # v10.2: Game Setup always opens on 1 vs 4 Bots
+    """Show the game setup screen and return the chosen settings."""
+    cfg["opponents"] = 4                              # Game Setup always opens on 1 vs 4 Bots
     cards = [(1, "1 vs 1 Bot", "1H1B - a duel against the solved-game bot"),
              (2, "1 vs 2 Bots", "1H2B - three-way survival"),
              (4, "1 vs 4 Bots", "1H4B - five-player free-for-all")]
@@ -2621,7 +2855,7 @@ def menu(ctx, cfg):
     diff_rects = [pygame.Rect(70 + i * 170, 360, 150, 54) for i in range(3)]
     timers = [3, 5, 10]
     timer_rects = [pygame.Rect(720 + i * 130, 360, 110, 54) for i in range(3)]
-    hot_rect = pygame.Rect(70, 480, 230, 56)          # v10.2: short button, same left edge
+    hot_rect = pygame.Rect(70, 480, 230, 56)          # Testing mode button; its colour shows ON (red) / OFF
     start_rect = pygame.Rect(W // 2 - 140, 600, 280, 76)
     help_rect = pygame.Rect(70, 610, 200, 56)
     diff_desc = {"easy": "Makes deliberate mistakes. A good first opponent.",
@@ -2697,7 +2931,8 @@ def menu(ctx, cfg):
 #  Entry points
 # ---------------------------------------------------------------------------
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description="007 v9")
+    """Read the command-line options."""
+    ap = argparse.ArgumentParser(description="007 - only one shall stand")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--tournament", type=int, metavar="GAMES")
     ap.add_argument("--solve", action="store_true")
@@ -2716,8 +2951,17 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+# The options in force.  Until main() reads the real command line these are the defaults, taken from
+# parse_args() itself so that there is only one list of options and default values.
+OPTS = parse_args([])
+
+
 def retune_after_game(store):
-    """Let 007-train-bot.py re-fit the tuned variables on all recorded games (one small step per game)."""
+    """Re-fit the tuned variables on all recorded games with 007-train-bot.py.
+
+    Each call moves the values by at most one small step, so a single unusual game cannot throw them
+    around.
+    """
     path = os.path.join(SCRIPT_DIR, "007-train-bot.py")
     if not os.path.exists(path):
         return
@@ -2737,10 +2981,14 @@ _RETUNE = {"thread": None, "done": False}
 
 
 def retune_in_background(store_dir):
-    """v10.2: retune_after_game() re-scores every recorded game and takes several seconds, which used to
-    delay the game-over screen.  Now it runs in a thread on a SEPARATE copy of this module (the tuning
-    temporarily changes module variables, so a game started meanwhile is not disturbed).  The new values
-    are applied when the next game starts.  Not a daemon thread: quitting waits until it has saved."""
+    """Start the after-game re-tuning in a background thread.
+
+    The re-tuning re-scores every recorded game and takes several seconds, which would otherwise delay
+    the game-over screen.  The thread works on a separate copy of this module, because the tuning
+    temporarily changes module variables and a game started meanwhile must not be disturbed.  The new
+    values are applied when the next game starts.  It is not a daemon thread, so quitting waits until
+    the result is saved.
+    """
     import importlib.util
     import threading
     old = _RETUNE["thread"]
@@ -2748,6 +2996,7 @@ def retune_in_background(store_dir):
         old.join()
 
     def work():
+        """Do the re-tuning on a separate copy of this module."""
         try:
             name = "game007_retune"
             spec = importlib.util.spec_from_file_location(name, os.path.abspath(__file__))
@@ -2764,6 +3013,7 @@ def retune_in_background(store_dir):
 
 
 def main(argv=None):
+    """Start the game, or one of the headless tools."""
     global OPTS
     args = parse_args(argv if argv is not None else sys.argv[1:])
     OPTS = args
@@ -2806,7 +3056,7 @@ def main(argv=None):
                                     f"  |  {cfg['difficulty'].title()}  |  {cfg['timer']}s"
                                     + ("" if cfg["hotseat"] else f"  |  game #{ctx.stats['games'] + 1}")
                                     + "  |  Space = skip")
-                if _RETUNE["done"]:                          # v10.2: values from the background retune
+                if _RETUNE["done"]:                          # new values from the background retune
                     _RETUNE["done"] = False
                     apply_params(ctx.store.load_params())
                 try:
@@ -2825,7 +3075,7 @@ def main(argv=None):
                     except OSError as err:
                         print(f"[007] could not save the game record / bot memory: {err}", file=sys.stderr)
                         rec = None
-                    retune_in_background(ctx.store.dir)  # v10.2: no wait before the game-over screen
+                    retune_in_background(ctx.store.dir)  # takes seconds: runs in the background
                     ctx.stats = BotStore.summary(ctx.store.records())
                 if args.games and games >= args.games:
                     return 0
