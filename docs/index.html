@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- 007 v10.2 website: open this file to play.  The game is drawn on the canvas by js/ui.js;
+     js/core.js holds the rules and the bot, js/v2p.js the solved 2-player values. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>007 - Only one shall stand</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #05060f; overflow: hidden; }
+    body { display: flex; align-items: center; justify-content: center; }
+    canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+    noscript { color: #f0f0fa; font: 18px "Segoe UI", Arial, sans-serif; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="1280" height="720" aria-label="007 game"></canvas>
+  <noscript>007 needs JavaScript to run.</noscript>
+  <script src="js/v2p.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
