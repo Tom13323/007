@@ -1,6 +1,10 @@
 # 007: Only one shall stand
 Author: Tom13323
 
+## ▶ [Play it in your browser: tom13323.github.io/007](https://tom13323.github.io/007/)
+
+No installation: the website version runs the same game and the same bots in JavaScript.
+
 *How's your luck? Wanna gamble?*
 
 A multi-round, simultaneous-decision game: you against 1, 2 or 4 bots. Every round, everyone secretly
@@ -50,7 +54,9 @@ game.
 
 ## Run it
 
-Needs Python 3 and pygame 2.
+**In the browser:** open the link above.
+
+**On your computer** (needs Python 3 and pygame 2):
 
 ```
 pip install -r requirements-v10.txt              # only pygame
@@ -76,6 +82,7 @@ python 007-train-bot.py --status     # what the bots know about you
 | `007-premode-pygame-v10.2.py` | The game: rules engine, bots, interface (current version) |
 | `007-train-bot.py` | Bot trainer; the game also calls it after every match |
 | `007-premode-pygame-v10.py` | Previous version |
+| `docs/` | The website version (JavaScript): `js/core.js` = rules and bots, `js/ui.js` = screens. `docs/tests/run_tests.js` checks that it computes exactly what the Python game computes |
 | `bot_data_v10/` | Created on first run: your game records and the bots' memory. Stays on your computer |
 
 ## Use of AI
